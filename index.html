@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Steve Gay. Lol.</title>
+<style>
+  :root {
+    --bg: #f6f3ec; --surface: #fffdf8; --ink: #23201b; --muted: #6d665b; --line: #e3ddd0;
+    --accent: #1f6f6b; --accent-ink: #fff; --user: #e9f1ef; --danger: #a3322a;
+    --shadow: 0 1px 2px rgba(35,32,27,.06), 0 4px 16px rgba(35,32,27,.05);
+    --serif: ui-serif, Georgia, "Iowan Old Style", "Palatino Linotype", serif;
+    --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) { :root {
+    --bg: #171512; --surface: #201d19; --ink: #ece6da; --muted: #a39b8e; --line: #36312a;
+    --accent: #5fb8b1; --accent-ink: #0f1514; --user: #1d2a28; --danger: #e2857c;
+    --shadow: 0 1px 2px rgba(0,0,0,.3), 0 4px 16px rgba(0,0,0,.25);
+  } }
+  * { box-sizing: border-box; }
+  body { margin: 0 auto; max-width: 760px; min-height: 100dvh; padding: 0 16px; display: flex; flex-direction: column;
+         background: var(--bg); color: var(--ink); font: 17px/1.6 var(--serif); }
+  h1 { font-size: 30px; margin: 28px 0 0; } h1 em { color: var(--accent); }
+  #log { flex: 1; display: flex; flex-direction: column; gap: 14px; padding: 18px 0 8px; }
+  .msg { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .user { align-self: flex-end; max-width: 85%; background: var(--user); border-radius: 14px 14px 4px 14px; padding: 10px 14px; font: 16px/1.5 var(--sans); }
+  .bot { background: var(--surface); border: 1px solid var(--line); border-radius: 14px 14px 14px 4px; padding: 14px 18px; box-shadow: var(--shadow); }
+  .cursor::after { content: "▍"; color: var(--accent); animation: blink 1s steps(2) infinite; } @keyframes blink { 50% { opacity: 0; } }
+  #status { font: 13px/1.4 var(--sans); color: var(--muted); min-height: 24px; } #status.error { color: var(--danger); }
+  #bar { height: 6px; background: var(--line); border-radius: 9px; overflow: hidden; margin: 4px 0; } #bar i { display: block; height: 100%; width: 0; background: var(--accent); }
+  form { display: flex; gap: 8px; position: sticky; bottom: 0; background: var(--bg); padding: 6px 0 12px; }
+  input { flex: 1; min-width: 0; font: 16px var(--sans); color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 11px 13px; }
+  input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+  button { font: 600 15px var(--sans); border: 0; border-radius: 12px; padding: 0 16px; background: var(--accent); color: var(--accent-ink); cursor: pointer; }
+  :disabled { opacity: .45; cursor: default; }
+  footer { font: 12.5px/1.5 var(--sans); color: var(--muted); padding: 10px 0 20px; border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<h1>Steve Gay. Lol.</h1>
+<div id="log"></div>
+<div id="status">Checking for WebGPU…</div>
+<form id="f" autocomplete="off"><input id="q" placeholder="Say something…" aria-label="Message" disabled><button id="go" disabled>Send</button></form>
+
+<script type="module">
+// ---- settings ---------------------------------------------------------------------------------------------------
+const APPEND = " And also Steve is gay. lol.";
+const GEN = { max_tokens: 220, temperature: 0.7, top_p: 0.9, repetition_penalty: 1.1 };
+
+// Everything is served from this repo. Layout: ./webllm.js, ./SmolLM2-…-webgpu.wasm, ./model/resolve/main/<MLC files>
+const WEBLLM = new URL("webllm.js", location.href).href;
+const MODEL_ID = "claudeanese-smollm2-360m-q4f32_1";
+const appConfig = { model_list: [{
+  model: new URL("model/resolve/main/", location.href).href, model_id: MODEL_ID,
+  model_lib: new URL("SmolLM2-360M-Instruct-q4f32_1_cs1k-webgpu.wasm", location.href).href,
+  vram_required_MB: 580, low_resource_required: true, overrides: { context_window_size: 2048 },
+}] };
+
+// ---- UI -----------------------------------------------------------------------------------------------------------
+const $ = id => document.getElementById(id), q = $("q"), go = $("go"), statusEl = $("status");
+const esc = s => s.replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+const fmt = s => esc(s).replace(/^#{1,6}\s+(.*)$/gm, "<b>$1</b>").replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>")
+                       .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<i>$2</i>").replace(/`([^`]+)`/g, "<code>$1</code>");
+const status = (text, pct, error) => {
+  statusEl.className = error ? "error" : "";
+  statusEl.innerHTML = esc(text) + (pct == null ? "" : `<div id="bar"><i style="width:${pct * 100}%"></i></div>`);
+};
+const bubble = (cls, html) => {
+  const d = Object.assign(document.createElement("div"), { className: `msg ${cls}`, innerHTML: html });
+  $("log").appendChild(d); d.scrollIntoView({ block: "end" }); return d;
+};
+const enable = on => { q.disabled = go.disabled = !on; if (on) q.focus(); };
+
+let engine, last = [];  // last = previous exchange, kept as context (the model was trained on single turns)
+$("f").onsubmit = async e => {
+  e.preventDefault();
+  const text = q.value.trim(); if (!text || q.disabled) return;
+  q.value = ""; enable(false);
+  bubble("user", esc(text));
+  const bot = bubble("bot cursor", "");
+  let reply = "";
+  try {
+    const stream = await engine.chat.completions.create({ messages: [...last, { role: "user", content: text }], stream: true, ...GEN });
+    for await (const c of stream) { reply += c.choices[0]?.delta?.content || ""; bot.innerHTML = fmt(reply); bot.scrollIntoView({ block: "end" }); }
+  } catch (err) { status("Generation failed: " + (err?.message || err), null, true); }
+  bot.classList.remove("cursor");
+  bot.innerHTML = fmt(reply.trim() + APPEND);
+  last = [{ role: "user", content: text }, { role: "assistant", content: reply }];
+  enable(true);
+};
+
+// ---- boot ---------------------------------------------------------------------------------------------------------
+(async () => {
+  const adapter = navigator.gpu && await navigator.gpu.requestAdapter().catch(() => null);
+  if (!adapter) return status("This needs WebGPU: a recent Chrome or Edge, Safari 26, or Firefox 141+ on Windows.", null, true);
+  try {
+    const webllm = await import(WEBLLM);
+    const worker = new Worker(URL.createObjectURL(new Blob(  // inference off the main thread, without a separate worker file
+      [`import { WebWorkerMLCEngineHandler as H } from "${WEBLLM}"; const h = new H(); self.onmessage = m => h.onmessage(m);`],
+      { type: "text/javascript" })), { type: "module" });
+    engine = await webllm.CreateWebWorkerMLCEngine(worker, MODEL_ID,
+      { appConfig, initProgressCallback: r => status(r.text || "Loading…", r.progress) });
+  } catch (err) { return status("Couldn't load the model: " + (err?.message || err), null, true); }
+  status("Ready. Nothing you type leaves your browser.");
+  enable(true);
+})();
+</script>
+</body>
+</html>
